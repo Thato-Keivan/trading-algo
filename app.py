@@ -4,22 +4,23 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
+import time
 
-st.set_page_config(page_title="MT5 Terminal", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Live MT5 Terminal", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
     <style>
     .main { background-color: #000000; color: #ffffff; }
-    .stSelectbox, .stNumberInput, .stSlider { background-color: #1c1c1c; }
-    .signal-buy { color: #00FF00; font-weight: bold; font-size: 1.2rem; background: #003300; padding: 10px; border-radius: 5px;}
-    .signal-sell { color: #FF0000; font-weight: bold; font-size: 1.2rem; background: #330000; padding: 10px; border-radius: 5px;}
-    .signal-neutral { color: #888888; font-weight: bold; font-size: 1.2rem; background: #222222; padding: 10px; border-radius: 5px;}
+    .stSelectbox, .stNumberInput, .stSlider, .stCheckbox { background-color: #1c1c1c; }
+    .signal-buy { color: #00FF00; font-weight: bold; font-size: 1.2rem; background: #003300; padding: 10px; border-radius: 5px; text-align: center;}
+    .signal-sell { color: #FF0000; font-weight: bold; font-size: 1.2rem; background: #330000; padding: 10px; border-radius: 5px; text-align: center;}
+    .signal-neutral { color: #888888; font-weight: bold; font-size: 1.2rem; background: #222222; padding: 10px; border-radius: 5px; text-align: center;}
     </style>
 """, unsafe_allow_html=True)
 
 ASSETS = {"BTC/USD": "BTC-USD", "XAU/USD (Gold)": "GC=F"}
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=10) # Reduced cache to 10 seconds for live updates
 def get_market_data(ticker, period, interval):
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
@@ -47,17 +48,16 @@ def calc_indicators(df):
     df['Fisher'] = pd.Series(fish, index=df.index)
     df['Fisher_Signal'] = df['Fisher'].shift(1)
     
-    # Signal Logic (1 = Buy, -1 = Sell)
     df['Buy_Condition'] = (df['EMA_21'] > df['EMA_50']) & (df['Fisher'] > df['Fisher_Signal']) & (df['Fisher'].shift(1) <= df['Fisher_Signal'].shift(1))
     df['Sell_Condition'] = (df['EMA_21'] < df['EMA_50']) & (df['Fisher'] < df['Fisher_Signal']) & (df['Fisher'].shift(1) >= df['Fisher_Signal'].shift(1))
     
     return df
 
-st.title("📈 MQL5-Style Trading Terminal")
+st.title("📈 Live MQL5-Style Trading Terminal")
 usd_zar = get_usd_zar()
 
-with st.expander("⚙️ Controls & Settings", expanded=False):
-    c1, c2, c3 = st.columns(3)
+with st.expander("⚙️ Controls & Risk/Leverage Setup", expanded=False):
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         asset_name = st.selectbox("Symbol", list(ASSETS.keys()))
         tf_map = {
@@ -70,59 +70,62 @@ with st.expander("⚙️ Controls & Settings", expanded=False):
         balance_zar = st.number_input("Account Balance (ZAR)", value=20000.0, step=1000.0)
         risk_pct = st.slider("Risk per Trade (%)", 0.5, 5.0, 1.0, 0.5)
     with c3:
-        atr_mult = st.slider("Stop Loss Looseness (ATR)", 1.0, 3.0, 1.5, 0.1)
-        rr_ratio = st.number_input("Take Profit Multiplier", value=2.0, step=0.1)
+        leverage = st.number_input("Broker Leverage (1:X)", value=100, step=50)
+        auto_refresh = st.checkbox("🟢 Enable Live Auto-Refresh (60s)")
+    with c4:
+        atr_mult = st.slider("SL ATR Looseness", 1.0, 3.0, 1.5, 0.1)
+        rr_ratio = st.number_input("Take Profit Ratio", value=2.0, step=0.1)
 
 ticker, (period, interval) = ASSETS[asset_name], tf_map[tf]
 df = calc_indicators(get_market_data(ticker, period, interval))
 if df.empty: st.stop()
 
-# Performance Optimization: Only plot the last 300 candles to eliminate lag
 plot_df = df.tail(300)
-
 latest = plot_df.iloc[-1]
 entry = latest['Close'].item()
 stop_dist = latest['ATR'].item() * atr_mult
 
-# Live Signal Detection
 signal, sig_class = "NEUTRAL (No Trade)", "signal-neutral"
 sl, tp = 0.0, 0.0
 
 if latest['Buy_Condition']:
-    signal, sig_class = "🟢 BUY SIGNAL", "signal-buy"
+    signal, sig_class = "🟢 LIVE: BUY SIGNAL TRIGGERED", "signal-buy"
     sl, tp = entry - stop_dist, entry + (stop_dist * rr_ratio)
 elif latest['Sell_Condition']:
-    signal, sig_class = "🔴 SELL SIGNAL", "signal-sell"
+    signal, sig_class = "🔴 LIVE: SELL SIGNAL TRIGGERED", "signal-sell"
     sl, tp = entry + stop_dist, entry - (stop_dist * rr_ratio)
 
 risk_usd = (balance_zar * (risk_pct / 100)) / usd_zar
 pos_size = risk_usd / stop_dist if stop_dist > 0 else 0
+
+# Leverage Calculation: Margin required to open the position
+notional_value_usd = pos_size * entry
+margin_req_usd = notional_value_usd / leverage
+margin_req_zar = margin_req_usd * usd_zar
+
 prof_zar = (abs(entry - tp) * pos_size) * usd_zar if tp > 0 else 0
 
-st.markdown(f"<div class='{sig_class}'>Live Status: {signal}</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='{sig_class}'>{signal} @ ${entry:,.2f}</div>", unsafe_allow_html=True)
 st.write("")
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Current Price", f"${entry:,.2f}")
-m2.metric("Required Stop Loss", f"${sl:,.2f}" if sl else "-")
-m3.metric("Take Profit Target", f"${tp:,.2f}" if tp else "-")
-m4.metric("Potential Profit", f"R {prof_zar:,.0f}" if prof_zar else "-")
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Stop Loss", f"${sl:,.2f}" if sl else "-")
+m2.metric("Take Profit", f"${tp:,.2f}" if tp else "-")
+m3.metric("Position Units", f"{pos_size:,.4f}")
+m4.metric("Margin Required", f"R {margin_req_zar:,.2f}")
+m5.metric("Proj. Profit", f"R {prof_zar:,.0f}" if prof_zar else "-")
+
+if margin_req_zar > balance_zar:
+    st.error(f"⚠️ Insufficient margin! Reduce risk % or increase leverage. Required: R {margin_req_zar:,.2f}")
 
 st.divider()
 
 # Chart Rendering
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.8, 0.2], vertical_spacing=0.02)
-
-fig.add_trace(go.Candlestick(
-    x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'],
-    increasing_line_color='#00FF00', increasing_fillcolor='#00FF00',
-    decreasing_line_color='#FF0000', decreasing_fillcolor='#FF0000', name="OHLC"
-), row=1, col=1)
-
+fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], increasing_line_color='#00FF00', increasing_fillcolor='#00FF00', decreasing_line_color='#FF0000', decreasing_fillcolor='#FF0000', name="OHLC"), row=1, col=1)
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_21'], line=dict(color="yellow", width=1), name="EMA 21"), row=1, col=1)
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_50'], line=dict(color="blue", width=1), name="EMA 50"), row=1, col=1)
 
-# Explicit Buy/Sell Arrows on Chart
 buys = plot_df[plot_df['Buy_Condition']]
 sells = plot_df[plot_df['Sell_Condition']]
 fig.add_trace(go.Scatter(x=buys.index, y=buys['Low']*0.999, mode='markers', marker=dict(symbol='triangle-up', size=14, color='#00FF00'), name="BUY"), row=1, col=1)
@@ -131,12 +134,12 @@ fig.add_trace(go.Scatter(x=sells.index, y=sells['High']*1.001, mode='markers', m
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Fisher'], line=dict(color="#00FF00", width=1), name="Fisher"), row=2, col=1)
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Fisher_Signal'], line=dict(color="#FF0000", width=1), name="Signal"), row=2, col=1)
 
-fig.update_layout(
-    plot_bgcolor='#000000', paper_bgcolor='#000000', font=dict(color='#A0A0A0'),
-    height=650, margin=dict(l=0, r=0, t=5, b=0), xaxis_rangeslider_visible=False,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-)
+fig.update_layout(plot_bgcolor='#000000', paper_bgcolor='#000000', font=dict(color='#A0A0A0'), height=650, margin=dict(l=0, r=0, t=5, b=0), xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 fig.update_xaxes(showgrid=True, gridcolor='#222222', gridwidth=1)
 fig.update_yaxes(showgrid=True, gridcolor='#222222', gridwidth=1)
-
 st.plotly_chart(fig, use_container_width=True)
+
+# Live Polling Engine
+if auto_refresh:
+    time.sleep(60)
+    st.rerun()
