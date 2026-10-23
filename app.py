@@ -52,14 +52,13 @@ def calc_indicators(df, mode):
     df['Fisher_Signal'] = df['Fisher'].shift(1)
     
     df['Signal_Type'] = "NONE"
-    df['Buy_Condition'] = False
-    df['Sell_Condition'] = False
-
+    
     if mode == "Scalper (Aggressive)":
-        df['Buy_Condition'] = (df['EMA_21'] > df['EMA_50']) & (df['Fisher'] > df['Fisher_Signal'])
-        df['Sell_Condition'] = (df['EMA_21'] < df['EMA_50']) & (df['Fisher'] < df['Fisher_Signal'])
-        df.loc[df['Buy_Condition'], 'Signal_Type'] = "⚡ Aggressive Scalp (Momentum)"
-        df.loc[df['Sell_Condition'], 'Signal_Type'] = "⚡ Aggressive Scalp (Momentum)"
+        # Pure momentum crossovers, ignoring trend filters to force action
+        df['Buy_Condition'] = (df['Fisher'] > df['Fisher_Signal']) & (df['Fisher'].shift(1) <= df['Fisher_Signal'].shift(1))
+        df['Sell_Condition'] = (df['Fisher'] < df['Fisher_Signal']) & (df['Fisher'].shift(1) >= df['Fisher_Signal'].shift(1))
+        df.loc[df['Buy_Condition'], 'Signal_Type'] = "⚡ Pure Momentum Scalp (Buy)"
+        df.loc[df['Sell_Condition'], 'Signal_Type'] = "⚡ Pure Momentum Scalp (Sell)"
     else:
         df['CRT_Bullish'] = (df['Low'] < df['Low'].shift(1)) & (df['Close'] > df['Low'].shift(1))
         df['CRT_Bearish'] = (df['High'] > df['High'].shift(1)) & (df['Close'] < df['High'].shift(1))
@@ -103,34 +102,40 @@ with st.expander("⚙️ Controls, Strategy & Risk Setup", expanded=False):
     with c4:
         atr_mult = st.slider("SL ATR Multiplier", 1.0, 3.0, 1.5, 0.1)
         rr_ratio = st.number_input("Take Profit (R:R)", value=2.0, step=0.1)
-        auto_refresh = st.checkbox("🟢 Live Auto-Refresh (60s)")
+        auto_refresh = st.checkbox("🟢 Live Auto-Refresh (60s)", value=True)
 
 ticker, (period, interval) = ASSETS[asset_name], tf_map[tf]
 df = calc_indicators(get_market_data(ticker, period, interval), strategy_mode)
 if df.empty: st.stop()
 
 plot_df = df.tail(300)
-latest = plot_df.iloc[-1]
-entry = latest['Close'].item()
-stop_dist = latest['ATR'].item() * atr_mult
+# Always evaluate the LAST CLOSED candle (-2) for stable signals, but use current price (-1) for execution
+closed_candle = plot_df.iloc[-2]
+current_px = plot_df['Close'].iloc[-1]
+stop_dist = closed_candle['ATR'].item() * atr_mult
 
-signal, sig_class, setup_type = "NEUTRAL (Searching for Setups...)", "signal-neutral", "N/A"
+# Diagnostic Status Generator
+trend_dir = "UP" if closed_candle['EMA_21'] > closed_candle['EMA_50'] else "DOWN"
+mom_dir = "BULLISH" if closed_candle['Fisher'] > closed_candle['Fisher_Signal'] else "BEARISH"
+diag_status = f"Trend: {trend_dir} | Momentum: {mom_dir}"
+
+signal, sig_class, setup_type = f"NEUTRAL ({diag_status})", "signal-neutral", "N/A"
 sl, tp = 0.0, 0.0
 
-if latest['Buy_Condition']:
-    setup_type = latest['Signal_Type']
-    signal, sig_class = f"🟢 LIVE: BUY SIGNAL TRIGGERED<br><span style='font-size: 0.9rem;'>{setup_type}</span>", "signal-buy"
-    sl, tp = entry - stop_dist, entry + (stop_dist * rr_ratio)
-elif latest['Sell_Condition']:
-    setup_type = latest['Signal_Type']
-    signal, sig_class = f"🔴 LIVE: SELL SIGNAL TRIGGERED<br><span style='font-size: 0.9rem;'>{setup_type}</span>", "signal-sell"
-    sl, tp = entry + stop_dist, entry - (stop_dist * rr_ratio)
+if closed_candle['Buy_Condition']:
+    setup_type = closed_candle['Signal_Type']
+    signal, sig_class = f"🟢 CONFIRMED BUY SIGNAL (Last Candle)<br><span style='font-size: 0.9rem;'>{setup_type}</span>", "signal-buy"
+    sl, tp = current_px - stop_dist, current_px + (stop_dist * rr_ratio)
+elif closed_candle['Sell_Condition']:
+    setup_type = closed_candle['Signal_Type']
+    signal, sig_class = f"🔴 CONFIRMED SELL SIGNAL (Last Candle)<br><span style='font-size: 0.9rem;'>{setup_type}</span>", "signal-sell"
+    sl, tp = current_px + stop_dist, current_px - (stop_dist * rr_ratio)
 
 risk_usd = (balance_zar * (risk_pct / 100)) / usd_zar
 pos_size = risk_usd / stop_dist if stop_dist > 0 else 0
-notional_value_usd = pos_size * entry
+notional_value_usd = pos_size * current_px
 margin_req_zar = (notional_value_usd / leverage) * usd_zar if leverage > 0 else 0
-prof_zar = (abs(entry - tp) * pos_size) * usd_zar if tp > 0 else 0
+prof_zar = (abs(current_px - tp) * pos_size) * usd_zar if tp > 0 else 0
 
 st.markdown(f"<div class='{sig_class}'>{signal}</div>", unsafe_allow_html=True)
 st.write("")
@@ -171,6 +176,9 @@ if not log_df.empty:
     display_log['Take Profit'] = np.where(log_df['Buy_Condition'], display_log['Close'] + (display_log['ATR'] * atr_mult * rr_ratio), display_log['Close'] - (display_log['ATR'] * atr_mult * rr_ratio))
     display_log = display_log[['Direction', 'Signal_Type', 'Close', 'Stop Loss', 'Take Profit']]
     display_log.columns = ['Action', 'Setup Strategy', 'Entry Price', 'Stop Loss', 'Take Profit']
+    
+    # Show most recent signals at the top
+    display_log = display_log.iloc[::-1]
     display_log.index = display_log.index.strftime('%Y-%m-%d %H:%M:%S (NY Time)')
     st.dataframe(display_log.style.format({'Entry Price': '${:,.2f}', 'Stop Loss': '${:,.2f}', 'Take Profit': '${:,.2f}'}), use_container_width=True)
 else:
