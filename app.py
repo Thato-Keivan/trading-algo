@@ -55,10 +55,14 @@ def calc_indicators(df):
     df['CRT_Bearish'] = (df['High'] > df['High'].shift(1)) & (df['Close'] < df['High'].shift(1))
     df['Is_9AM'] = df.index.hour == 9
     
+    # Loosened Strategy Logic
     std_buy = (df['EMA_21'] > df['EMA_50']) & (df['Fisher'] > df['Fisher_Signal']) & (df['Fisher'].shift(1) <= df['Fisher_Signal'].shift(1))
     std_sell = (df['EMA_21'] < df['EMA_50']) & (df['Fisher'] < df['Fisher_Signal']) & (df['Fisher'].shift(1) >= df['Fisher_Signal'].shift(1))
-    crt_fisher_buy = df['CRT_Bullish'] & (df['Fisher'] > df['Fisher_Signal']) & (df['Fisher'].shift(1) <= df['Fisher_Signal'].shift(1))
-    crt_fisher_sell = df['CRT_Bearish'] & (df['Fisher'] < df['Fisher_Signal']) & (df['Fisher'].shift(1) >= df['Fisher_Signal'].shift(1))
+    
+    # CRT sweeps now only require directional Fisher confirmation, not an exact crossover
+    crt_fisher_buy = df['CRT_Bullish'] & (df['Fisher'] > df['Fisher_Signal'])
+    crt_fisher_sell = df['CRT_Bearish'] & (df['Fisher'] < df['Fisher_Signal'])
+    
     model_9am_buy = df['CRT_Bullish'] & df['Is_9AM'] & (df['Fisher'] > df['Fisher_Signal'])
     model_9am_sell = df['CRT_Bearish'] & df['Is_9AM'] & (df['Fisher'] < df['Fisher_Signal'])
     
