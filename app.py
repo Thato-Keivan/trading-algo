@@ -32,7 +32,7 @@ def get_usd_zar():
     zar = yf.download("ZAR=X", period="1d", interval="1d", progress=False)
     return zar['Close'].iloc[-1].item() if not zar.empty else 18.00
 
-def calc_indicators(df):
+def calc_indicators(df, mode):
     df = df.copy()
     if df.index.tz is None:
         df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
@@ -51,38 +51,40 @@ def calc_indicators(df):
     df['Fisher'] = pd.Series(fish, index=df.index)
     df['Fisher_Signal'] = df['Fisher'].shift(1)
     
-    df['CRT_Bullish'] = (df['Low'] < df['Low'].shift(1)) & (df['Close'] > df['Low'].shift(1))
-    df['CRT_Bearish'] = (df['High'] > df['High'].shift(1)) & (df['Close'] < df['High'].shift(1))
-    df['Is_9AM'] = df.index.hour == 9
-    
-    # Loosened Strategy Logic
-    std_buy = (df['EMA_21'] > df['EMA_50']) & (df['Fisher'] > df['Fisher_Signal']) & (df['Fisher'].shift(1) <= df['Fisher_Signal'].shift(1))
-    std_sell = (df['EMA_21'] < df['EMA_50']) & (df['Fisher'] < df['Fisher_Signal']) & (df['Fisher'].shift(1) >= df['Fisher_Signal'].shift(1))
-    
-    # CRT sweeps now only require directional Fisher confirmation, not an exact crossover
-    crt_fisher_buy = df['CRT_Bullish'] & (df['Fisher'] > df['Fisher_Signal'])
-    crt_fisher_sell = df['CRT_Bearish'] & (df['Fisher'] < df['Fisher_Signal'])
-    
-    model_9am_buy = df['CRT_Bullish'] & df['Is_9AM'] & (df['Fisher'] > df['Fisher_Signal'])
-    model_9am_sell = df['CRT_Bearish'] & df['Is_9AM'] & (df['Fisher'] < df['Fisher_Signal'])
-    
-    df['Buy_Condition'] = std_buy | crt_fisher_buy | model_9am_buy
-    df['Sell_Condition'] = std_sell | crt_fisher_sell | model_9am_sell
-    
     df['Signal_Type'] = "NONE"
-    df.loc[std_buy, 'Signal_Type'] = "Standard Trend Breakout"
-    df.loc[std_sell, 'Signal_Type'] = "Standard Trend Breakout"
-    df.loc[crt_fisher_buy, 'Signal_Type'] = "CRT Liquidity Sweep"
-    df.loc[crt_fisher_sell, 'Signal_Type'] = "CRT Liquidity Sweep"
-    df.loc[model_9am_buy, 'Signal_Type'] = "🔥 9AM CR MODEL"
-    df.loc[model_9am_sell, 'Signal_Type'] = "🔥 9AM CR MODEL"
-    
+    df['Buy_Condition'] = False
+    df['Sell_Condition'] = False
+
+    if mode == "Scalper (Aggressive)":
+        df['Buy_Condition'] = (df['EMA_21'] > df['EMA_50']) & (df['Fisher'] > df['Fisher_Signal'])
+        df['Sell_Condition'] = (df['EMA_21'] < df['EMA_50']) & (df['Fisher'] < df['Fisher_Signal'])
+        df.loc[df['Buy_Condition'], 'Signal_Type'] = "⚡ Aggressive Scalp (Momentum)"
+        df.loc[df['Sell_Condition'], 'Signal_Type'] = "⚡ Aggressive Scalp (Momentum)"
+    else:
+        df['CRT_Bullish'] = (df['Low'] < df['Low'].shift(1)) & (df['Close'] > df['Low'].shift(1))
+        df['CRT_Bearish'] = (df['High'] > df['High'].shift(1)) & (df['Close'] < df['High'].shift(1))
+        df['Is_9AM'] = df.index.hour == 9
+        
+        std_buy = (df['EMA_21'] > df['EMA_50']) & (df['Fisher'] > df['Fisher_Signal']) & (df['Fisher'].shift(1) <= df['Fisher_Signal'].shift(1))
+        std_sell = (df['EMA_21'] < df['EMA_50']) & (df['Fisher'] < df['Fisher_Signal']) & (df['Fisher'].shift(1) >= df['Fisher_Signal'].shift(1))
+        crt_fisher_buy = df['CRT_Bullish'] & (df['Fisher'] > df['Fisher_Signal'])
+        crt_fisher_sell = df['CRT_Bearish'] & (df['Fisher'] < df['Fisher_Signal'])
+        model_9am_buy = df['CRT_Bullish'] & df['Is_9AM'] & (df['Fisher'] > df['Fisher_Signal'])
+        model_9am_sell = df['CRT_Bearish'] & df['Is_9AM'] & (df['Fisher'] < df['Fisher_Signal'])
+        
+        df['Buy_Condition'] = std_buy | crt_fisher_buy | model_9am_buy
+        df['Sell_Condition'] = std_sell | crt_fisher_sell | model_9am_sell
+        
+        df.loc[std_buy | std_sell, 'Signal_Type'] = "Standard Trend Breakout"
+        df.loc[crt_fisher_buy | crt_fisher_sell, 'Signal_Type'] = "CRT Liquidity Sweep"
+        df.loc[model_9am_buy | model_9am_sell, 'Signal_Type'] = "🔥 9AM CR MODEL"
+
     return df
 
-st.title("📈 Institutional Algorithmic Terminal")
+st.title("📈 Multi-Mode Algorithmic Terminal")
 usd_zar = get_usd_zar()
 
-with st.expander("⚙️ Controls & Risk/Leverage Setup", expanded=False):
+with st.expander("⚙️ Controls, Strategy & Risk Setup", expanded=False):
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         asset_name = st.selectbox("Symbol", list(ASSETS.keys()))
@@ -91,19 +93,20 @@ with st.expander("⚙️ Controls & Risk/Leverage Setup", expanded=False):
             "15 Minutes": ("60d", "15m"), "30 Minutes": ("60d", "30m"),
             "1 Hour": ("60d", "1h"), "4 Hours": ("1y", "4h"), "Daily": ("max", "1d")
         }
-        tf = st.selectbox("Timeframe", list(tf_map.keys()), index=4)
+        tf = st.selectbox("Timeframe", list(tf_map.keys()), index=0)
     with c2:
+        strategy_mode = st.selectbox("Strategy Mode", ["Institutional (Strict)", "Scalper (Aggressive)"], index=1)
         balance_zar = st.number_input("Account Balance (ZAR)", value=20000.0, step=1000.0)
-        risk_pct = st.slider("Risk per Trade (%)", 0.5, 5.0, 1.0, 0.5)
     with c3:
+        risk_pct = st.slider("Risk per Trade (%)", 0.5, 5.0, 1.0, 0.5)
         leverage = st.number_input("Broker Leverage (1:X)", value=100, step=50)
-        auto_refresh = st.checkbox("🟢 Enable Live Auto-Refresh (60s)")
     with c4:
         atr_mult = st.slider("SL ATR Multiplier", 1.0, 3.0, 1.5, 0.1)
         rr_ratio = st.number_input("Take Profit (R:R)", value=2.0, step=0.1)
+        auto_refresh = st.checkbox("🟢 Live Auto-Refresh (60s)")
 
 ticker, (period, interval) = ASSETS[asset_name], tf_map[tf]
-df = calc_indicators(get_market_data(ticker, period, interval))
+df = calc_indicators(get_market_data(ticker, period, interval), strategy_mode)
 if df.empty: st.stop()
 
 plot_df = df.tail(300)
@@ -126,7 +129,7 @@ elif latest['Sell_Condition']:
 risk_usd = (balance_zar * (risk_pct / 100)) / usd_zar
 pos_size = risk_usd / stop_dist if stop_dist > 0 else 0
 notional_value_usd = pos_size * entry
-margin_req_zar = (notional_value_usd / leverage) * usd_zar
+margin_req_zar = (notional_value_usd / leverage) * usd_zar if leverage > 0 else 0
 prof_zar = (abs(entry - tp) * pos_size) * usd_zar if tp > 0 else 0
 
 st.markdown(f"<div class='{sig_class}'>{signal}</div>", unsafe_allow_html=True)
@@ -139,12 +142,8 @@ m3.metric("Position Units", f"{pos_size:,.4f}")
 m4.metric("Margin Required", f"R {margin_req_zar:,.2f}")
 m5.metric("Proj. Profit", f"R {prof_zar:,.0f}" if prof_zar else "-")
 
-if margin_req_zar > balance_zar:
-    st.error(f"⚠️ Insufficient margin! Reduce risk % or increase leverage.")
-
 st.divider()
 
-# Chart Rendering
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.8, 0.2], vertical_spacing=0.02)
 fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'], increasing_line_color='#00FF00', increasing_fillcolor='#00FF00', decreasing_line_color='#FF0000', decreasing_fillcolor='#FF0000', name="OHLC"), row=1, col=1)
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_21'], line=dict(color="yellow", width=1), name="EMA 21"), row=1, col=1)
@@ -159,11 +158,8 @@ fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Fisher'], line=dict(color="
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Fisher_Signal'], line=dict(color="#FF0000", width=1), name="Signal"), row=2, col=1)
 
 fig.update_layout(plot_bgcolor='#000000', paper_bgcolor='#000000', font=dict(color='#A0A0A0'), height=550, margin=dict(l=0, r=0, t=5, b=0), xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-fig.update_xaxes(showgrid=True, gridcolor='#222222', gridwidth=1)
-fig.update_yaxes(showgrid=True, gridcolor='#222222', gridwidth=1)
 st.plotly_chart(fig, use_container_width=True)
 
-# 24-Hour Signal Log
 st.markdown("### 📝 24-Hour Historical Signal Log")
 cutoff_time = df.index[-1] - pd.Timedelta(hours=24)
 log_df = df[(df.index >= cutoff_time) & ((df['Buy_Condition']) | (df['Sell_Condition']))].copy()
@@ -173,13 +169,12 @@ if not log_df.empty:
     display_log = log_df[['Direction', 'Signal_Type', 'Close', 'ATR']].copy()
     display_log['Stop Loss'] = np.where(log_df['Buy_Condition'], display_log['Close'] - (display_log['ATR'] * atr_mult), display_log['Close'] + (display_log['ATR'] * atr_mult))
     display_log['Take Profit'] = np.where(log_df['Buy_Condition'], display_log['Close'] + (display_log['ATR'] * atr_mult * rr_ratio), display_log['Close'] - (display_log['ATR'] * atr_mult * rr_ratio))
-    
     display_log = display_log[['Direction', 'Signal_Type', 'Close', 'Stop Loss', 'Take Profit']]
     display_log.columns = ['Action', 'Setup Strategy', 'Entry Price', 'Stop Loss', 'Take Profit']
     display_log.index = display_log.index.strftime('%Y-%m-%d %H:%M:%S (NY Time)')
     st.dataframe(display_log.style.format({'Entry Price': '${:,.2f}', 'Stop Loss': '${:,.2f}', 'Take Profit': '${:,.2f}'}), use_container_width=True)
 else:
-    st.write("No institutional setups detected in the last 24 hours for the selected timeframe.")
+    st.write("No setups detected in the last 24 hours for the selected timeframe and strategy mode.")
 
 if auto_refresh:
     time.sleep(60)
